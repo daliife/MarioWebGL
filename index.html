@@ -1,0 +1,1554 @@
+<html>
+
+<head>
+    
+    <title>Pràctica WebGL - Super Mario Bros</title>
+    <meta name="description" content="Final project for the subject Advanced Graphics">
+    <meta name="author" content="Marc Aragones, Marc Arroyo and David Gimeno">
+    <meta http-equiv="content-type" content="text/html; charset=ISO-8859-1">
+    
+    <!-- Css Afegits -->
+    <link rel="stylesheet" type="text/css" href="css/bootstrap.min.css">
+    <link rel="stylesheet" type="text/css" href="css/hud-style.css">
+
+    <!-- Llibreria amb operacions amb vectors i matrius -->
+    <script type="text/javascript" src="gl-matrix-min.js"></script>
+    <!-- Llibreria que facilita la creació del context WebGL -->
+    <script type="text/javascript" src="webgl-utils.js"></script>
+    <!-- Llibreria per importar objectes 3d - http://k3d.ivank.net -->
+    <script type="text/javascript" src="K3D.js"></script>
+
+
+    <!-- Shaders --> 
+
+    <script id="shader-fs" type="x-shader/x-fragment">
+        precision mediump float;
+    	
+    	uniform float uLightIntensity;
+    	uniform vec3 uLightPos;
+    	uniform vec3 uAmbient;
+    	uniform vec3 uDiffuse;
+    	uniform vec3 uSpecular;
+    	uniform float uSpecularExp;
+        uniform sampler2D uSamplerDiff;	
+    	
+    	varying vec3 vNormal;
+    	varying vec3 vPosition;
+    	varying vec2 vTextureCoord;
+
+        void main(void) {
+
+    		const float PI = 3.14159265358979323846264;
+    	
+    		vec3 light = uLightPos - vPosition;
+    		float distance = length(light);
+    		light = normalize(light);
+    		
+    		vec3 normal = normalize(vNormal);
+    		vec3 view = normalize(-vPosition);
+    		vec3 halfV = normalize(view+light);
+    			
+    		float NL = max(0.0, dot(normal, light));
+    		float NH = max(0.0, dot(normal, halfV));
+    		float NHexp = pow(NH, uSpecularExp);
+    				
+    		float attenuation = 1.0 / ( 4.0 * PI * distance );
+    		float lightI = 10.0 * uLightIntensity * attenuation;
+    		
+    		vec3 diffColor = texture2D(uSamplerDiff, vTextureCoord).rgb;
+
+    		//Augmentem la il.luminacio ambient
+   			vec3 ambientNew = uAmbient *5.0;
+    		
+    		vec3 color = (ambientNew + uDiffuse * NL * lightI) * diffColor + uSpecular * NHexp * lightI;
+
+    		gl_FragColor = vec4(color, 1.0);
+        }
+    </script>
+
+    <script id="shader-vs" type="x-shader/x-vertex">
+        attribute vec3 aVertexPosition;
+    	attribute vec3 aVertexNormal;
+        attribute vec2 aTextureCoord;
+    	
+        uniform mat4 uMVMatrix;
+        uniform mat4 uPMatrix;
+    	uniform mat3 uNMatrix;
+    	
+    	varying vec3 vPosition;
+    	varying vec3 vNormal;
+    	varying vec2 vTextureCoord;
+
+        void main(void) {
+    	
+    		vNormal = uNMatrix * aVertexNormal;
+    		vPosition = vec3(uMVMatrix * vec4(aVertexPosition, 1.0));
+    		
+            vTextureCoord = aTextureCoord;
+    		
+            gl_Position = uPMatrix * uMVMatrix * vec4(aVertexPosition, 1.0);
+        }
+    </script>
+
+    <!-- Codi WebGL -->
+
+    <script type="text/javascript">
+
+        var gl;
+
+    	// Incialitza el context WebGL
+        function initGL(canvas) {
+            try {
+    			gl = WebGLUtils.setupWebGL(canvas);
+            } catch (e) {
+            }
+            if (!gl) {
+                alert("Could not initialise WebGL, sorry :-(");
+            }
+        }
+
+    	// Crea i compila un objecte del tipus shader
+        function getShader(gl, id) {
+            var shaderScript = document.getElementById(id);
+            if (!shaderScript) {
+                return null;
+            }
+
+            var str = "";
+            var k = shaderScript.firstChild;
+            while (k) {
+                if (k.nodeType == 3) {
+                    str += k.textContent;
+                }
+                k = k.nextSibling;
+            }
+
+            var shader;
+            if (shaderScript.type == "x-shader/x-fragment") {
+                shader = gl.createShader(gl.FRAGMENT_SHADER);
+            } else if (shaderScript.type == "x-shader/x-vertex") {
+                shader = gl.createShader(gl.VERTEX_SHADER);
+            } else {
+                return null;
+            }
+
+            gl.shaderSource(shader, str);
+            gl.compileShader(shader);
+
+            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                alert(gl.getShaderInfoLog(shader));
+                return null;
+            }
+
+            return shader;
+        }
+    	
+    	// Inicitalitza shaders
+    	
+    	function createProgram(fragmentShaderID, vertexShaderID) {
+    		var fragmentShader = getShader(gl, fragmentShaderID);
+            var vertexShader = getShader(gl, vertexShaderID);
+
+    		var shaderProgram = gl.createProgram();
+            gl.attachShader(shaderProgram, vertexShader);
+            gl.attachShader(shaderProgram, fragmentShader);
+            gl.linkProgram(shaderProgram);
+
+            if (!gl.getProgramParameter(shaderProgram, gl.LINK_STATUS)) {
+                alert("Could not initialise shaders" + fragmentShaderID + " " + vertexShaderID);
+            }		
+    		
+    		return shaderProgram;
+    	}
+
+    	var shaderProgram;
+    	var shaderProgramMario;
+    	var shaderProgramPipe;
+    	var shaderProgramBlocks;
+    	var shaderProgramGoomba;
+    	var shaderProgramCoin;
+    	var shaderProgramShell;
+    	var shaderProgramQuestion;
+    	var shaderProgramPlant;
+    	var shaderProgramBonus;
+        var shaderBackground;
+
+    	// Crea un programa a partir dels shader
+        function initShaders() {
+
+    		shaderProgramMario = createProgram("shader-fs", "shader-vs");
+
+            shaderProgramMario.vertexPositionAttribute = gl.getAttribLocation(shaderProgramMario, "aVertexPosition");
+            gl.enableVertexAttribArray(shaderProgramMario.vertexPositionAttribute);
+            shaderProgramMario.vertexNormalAttribute = gl.getAttribLocation(shaderProgramMario, "aVertexNormal");
+            gl.enableVertexAttribArray(shaderProgramMario.vertexNormalAttribute);
+            shaderProgramMario.textureCoordAttribute = gl.getAttribLocation(shaderProgramMario, "aTextureCoord");
+            gl.enableVertexAttribArray(shaderProgramMario.textureCoordAttribute);	
+            shaderProgramMario.pMatrixUniform = gl.getUniformLocation(shaderProgramMario, "uPMatrix");
+            shaderProgramMario.mvMatrixUniform = gl.getUniformLocation(shaderProgramMario, "uMVMatrix");
+            shaderProgramMario.nMatrixUniform = gl.getUniformLocation(shaderProgramMario, "uNMatrix");
+            shaderProgramMario.intensityUniform = gl.getUniformLocation(shaderProgramMario, "uLightIntensity");
+            shaderProgramMario.lightPosUniform = gl.getUniformLocation(shaderProgramMario, "uLightPos");
+            shaderProgramMario.ambientUniform = gl.getUniformLocation(shaderProgramMario, "uAmbient");
+            shaderProgramMario.diffuseUniform = gl.getUniformLocation(shaderProgramMario, "uDiffuse");
+            shaderProgramMario.specularUniform = gl.getUniformLocation(shaderProgramMario, "uSpecular");
+            shaderProgramMario.specularExpUniform = gl.getUniformLocation(shaderProgramMario, "uSpecularExp");
+            shaderProgramMario.samplerDiffUniform = gl.getUniformLocation(shaderProgramMario, "uSamplerDiff");
+    		
+    		shaderProgramPipe = createProgram("shader-fs", "shader-vs");
+
+            shaderProgramPipe.vertexPositionAttribute = gl.getAttribLocation(shaderProgramPipe, "aVertexPosition");
+            gl.enableVertexAttribArray(shaderProgramPipe.vertexPositionAttribute);
+            shaderProgramPipe.vertexNormalAttribute = gl.getAttribLocation(shaderProgramPipe, "aVertexNormal");
+            gl.enableVertexAttribArray(shaderProgramPipe.vertexNormalAttribute);
+            shaderProgramPipe.textureCoordAttribute = gl.getAttribLocation(shaderProgramPipe, "aTextureCoord");
+            gl.enableVertexAttribArray(shaderProgramPipe.textureCoordAttribute);	
+            shaderProgramPipe.pMatrixUniform = gl.getUniformLocation(shaderProgramPipe, "uPMatrix");
+            shaderProgramPipe.mvMatrixUniform = gl.getUniformLocation(shaderProgramPipe, "uMVMatrix");
+            shaderProgramPipe.nMatrixUniform = gl.getUniformLocation(shaderProgramPipe, "uNMatrix");
+            shaderProgramPipe.intensityUniform = gl.getUniformLocation(shaderProgramPipe, "uLightIntensity");
+            shaderProgramPipe.lightPosUniform = gl.getUniformLocation(shaderProgramPipe, "uLightPos");
+            shaderProgramPipe.ambientUniform = gl.getUniformLocation(shaderProgramPipe, "uAmbient");
+            shaderProgramPipe.diffuseUniform = gl.getUniformLocation(shaderProgramPipe, "uDiffuse");
+            shaderProgramPipe.specularUniform = gl.getUniformLocation(shaderProgramPipe, "uSpecular");
+            shaderProgramPipe.specularExpUniform = gl.getUniformLocation(shaderProgramPipe, "uSpecularExp");
+            shaderProgramPipe.samplerDiffUniform = gl.getUniformLocation(shaderProgramPipe, "uSamplerDiff");
+
+    		shaderProgramBlocks = createProgram("shader-fs", "shader-vs");
+
+            shaderProgramBlocks.vertexPositionAttribute = gl.getAttribLocation(shaderProgramBlocks, "aVertexPosition");
+            gl.enableVertexAttribArray(shaderProgramBlocks.vertexPositionAttribute);
+            shaderProgramBlocks.vertexNormalAttribute = gl.getAttribLocation(shaderProgramBlocks, "aVertexNormal");
+            gl.enableVertexAttribArray(shaderProgramBlocks.vertexNormalAttribute);
+            shaderProgramBlocks.textureCoordAttribute = gl.getAttribLocation(shaderProgramBlocks, "aTextureCoord");
+            gl.enableVertexAttribArray(shaderProgramBlocks.textureCoordAttribute);	
+            shaderProgramBlocks.pMatrixUniform = gl.getUniformLocation(shaderProgramBlocks, "uPMatrix");
+            shaderProgramBlocks.mvMatrixUniform = gl.getUniformLocation(shaderProgramBlocks, "uMVMatrix");
+            shaderProgramBlocks.nMatrixUniform = gl.getUniformLocation(shaderProgramBlocks, "uNMatrix");
+            shaderProgramBlocks.intensityUniform = gl.getUniformLocation(shaderProgramBlocks, "uLightIntensity");
+            shaderProgramBlocks.lightPosUniform = gl.getUniformLocation(shaderProgramBlocks, "uLightPos");
+            shaderProgramBlocks.ambientUniform = gl.getUniformLocation(shaderProgramBlocks, "uAmbient");
+            shaderProgramBlocks.diffuseUniform = gl.getUniformLocation(shaderProgramBlocks, "uDiffuse");
+            shaderProgramBlocks.specularUniform = gl.getUniformLocation(shaderProgramBlocks, "uSpecular");
+            shaderProgramBlocks.specularExpUniform = gl.getUniformLocation(shaderProgramBlocks, "uSpecularExp");
+            shaderProgramBlocks.samplerDiffUniform = gl.getUniformLocation(shaderProgramBlocks, "uSamplerDiff");
+
+    		shaderProgramGoomba = createProgram("shader-fs", "shader-vs");
+
+            shaderProgramGoomba.vertexPositionAttribute = gl.getAttribLocation(shaderProgramGoomba, "aVertexPosition");
+            gl.enableVertexAttribArray(shaderProgramGoomba.vertexPositionAttribute);
+            shaderProgramGoomba.vertexNormalAttribute = gl.getAttribLocation(shaderProgramGoomba, "aVertexNormal");
+            gl.enableVertexAttribArray(shaderProgramGoomba.vertexNormalAttribute);
+            shaderProgramGoomba.textureCoordAttribute = gl.getAttribLocation(shaderProgramGoomba, "aTextureCoord");
+            gl.enableVertexAttribArray(shaderProgramGoomba.textureCoordAttribute);	
+            shaderProgramGoomba.pMatrixUniform = gl.getUniformLocation(shaderProgramGoomba, "uPMatrix");
+            shaderProgramGoomba.mvMatrixUniform = gl.getUniformLocation(shaderProgramGoomba, "uMVMatrix");
+            shaderProgramGoomba.nMatrixUniform = gl.getUniformLocation(shaderProgramGoomba, "uNMatrix");
+            shaderProgramGoomba.intensityUniform = gl.getUniformLocation(shaderProgramGoomba, "uLightIntensity");
+            shaderProgramGoomba.lightPosUniform = gl.getUniformLocation(shaderProgramGoomba, "uLightPos");
+            shaderProgramGoomba.ambientUniform = gl.getUniformLocation(shaderProgramGoomba, "uAmbient");
+            shaderProgramGoomba.diffuseUniform = gl.getUniformLocation(shaderProgramGoomba, "uDiffuse");
+            shaderProgramGoomba.specularUniform = gl.getUniformLocation(shaderProgramGoomba, "uSpecular");
+            shaderProgramGoomba.specularExpUniform = gl.getUniformLocation(shaderProgramGoomba, "uSpecularExp");
+            shaderProgramGoomba.samplerDiffUniform = gl.getUniformLocation(shaderProgramGoomba, "uSamplerDiff");
+    	
+    		shaderProgramCoin = createProgram("shader-fs", "shader-vs");
+
+            shaderProgramCoin.vertexPositionAttribute = gl.getAttribLocation(shaderProgramCoin, "aVertexPosition");
+            gl.enableVertexAttribArray(shaderProgramCoin.vertexPositionAttribute);
+            shaderProgramCoin.vertexNormalAttribute = gl.getAttribLocation(shaderProgramCoin, "aVertexNormal");
+            gl.enableVertexAttribArray(shaderProgramCoin.vertexNormalAttribute);
+            shaderProgramCoin.textureCoordAttribute = gl.getAttribLocation(shaderProgramCoin, "aTextureCoord");
+            gl.enableVertexAttribArray(shaderProgramCoin.textureCoordAttribute);	
+            shaderProgramCoin.pMatrixUniform = gl.getUniformLocation(shaderProgramCoin, "uPMatrix");
+            shaderProgramCoin.mvMatrixUniform = gl.getUniformLocation(shaderProgramCoin, "uMVMatrix");
+            shaderProgramCoin.nMatrixUniform = gl.getUniformLocation(shaderProgramCoin, "uNMatrix");
+            shaderProgramCoin.intensityUniform = gl.getUniformLocation(shaderProgramCoin, "uLightIntensity");
+            shaderProgramCoin.lightPosUniform = gl.getUniformLocation(shaderProgramCoin, "uLightPos");
+            shaderProgramCoin.ambientUniform = gl.getUniformLocation(shaderProgramCoin, "uAmbient");
+            shaderProgramCoin.diffuseUniform = gl.getUniformLocation(shaderProgramCoin, "uDiffuse");
+            shaderProgramCoin.specularUniform = gl.getUniformLocation(shaderProgramCoin, "uSpecular");
+            shaderProgramCoin.specularExpUniform = gl.getUniformLocation(shaderProgramCoin, "uSpecularExp");
+            shaderProgramCoin.samplerDiffUniform = gl.getUniformLocation(shaderProgramCoin, "uSamplerDiff");
+
+    		shaderProgramShell = createProgram("shader-fs", "shader-vs");
+
+            shaderProgramShell.vertexPositionAttribute = gl.getAttribLocation(shaderProgramShell, "aVertexPosition");
+            gl.enableVertexAttribArray(shaderProgramShell.vertexPositionAttribute);
+            shaderProgramShell.vertexNormalAttribute = gl.getAttribLocation(shaderProgramShell, "aVertexNormal");
+            gl.enableVertexAttribArray(shaderProgramShell.vertexNormalAttribute);
+            shaderProgramShell.textureCoordAttribute = gl.getAttribLocation(shaderProgramShell, "aTextureCoord");
+            gl.enableVertexAttribArray(shaderProgramShell.textureCoordAttribute);	
+            shaderProgramShell.pMatrixUniform = gl.getUniformLocation(shaderProgramShell, "uPMatrix");
+            shaderProgramShell.mvMatrixUniform = gl.getUniformLocation(shaderProgramShell, "uMVMatrix");
+            shaderProgramShell.nMatrixUniform = gl.getUniformLocation(shaderProgramShell, "uNMatrix");
+            shaderProgramShell.intensityUniform = gl.getUniformLocation(shaderProgramShell, "uLightIntensity");
+            shaderProgramShell.lightPosUniform = gl.getUniformLocation(shaderProgramShell, "uLightPos");
+            shaderProgramShell.ambientUniform = gl.getUniformLocation(shaderProgramShell, "uAmbient");
+            shaderProgramShell.diffuseUniform = gl.getUniformLocation(shaderProgramShell, "uDiffuse");
+            shaderProgramShell.specularUniform = gl.getUniformLocation(shaderProgramShell, "uSpecular");
+            shaderProgramShell.specularExpUniform = gl.getUniformLocation(shaderProgramShell, "uSpecularExp");
+            shaderProgramShell.samplerDiffUniform = gl.getUniformLocation(shaderProgramShell, "uSamplerDiff");
+
+    		shaderProgramQuestion = createProgram("shader-fs", "shader-vs");
+
+            shaderProgramQuestion.vertexPositionAttribute = gl.getAttribLocation(shaderProgramQuestion, "aVertexPosition");
+            gl.enableVertexAttribArray(shaderProgramQuestion.vertexPositionAttribute);
+            shaderProgramQuestion.vertexNormalAttribute = gl.getAttribLocation(shaderProgramQuestion, "aVertexNormal");
+            gl.enableVertexAttribArray(shaderProgramQuestion.vertexNormalAttribute);
+            shaderProgramQuestion.textureCoordAttribute = gl.getAttribLocation(shaderProgramQuestion, "aTextureCoord");
+            gl.enableVertexAttribArray(shaderProgramQuestion.textureCoordAttribute);	
+            shaderProgramQuestion.pMatrixUniform = gl.getUniformLocation(shaderProgramQuestion, "uPMatrix");
+            shaderProgramQuestion.mvMatrixUniform = gl.getUniformLocation(shaderProgramQuestion, "uMVMatrix");
+            shaderProgramQuestion.nMatrixUniform = gl.getUniformLocation(shaderProgramQuestion, "uNMatrix");
+            shaderProgramQuestion.intensityUniform = gl.getUniformLocation(shaderProgramQuestion, "uLightIntensity");
+            shaderProgramQuestion.lightPosUniform = gl.getUniformLocation(shaderProgramQuestion, "uLightPos");
+            shaderProgramQuestion.ambientUniform = gl.getUniformLocation(shaderProgramQuestion, "uAmbient");
+            shaderProgramQuestion.diffuseUniform = gl.getUniformLocation(shaderProgramQuestion, "uDiffuse");
+            shaderProgramQuestion.specularUniform = gl.getUniformLocation(shaderProgramQuestion, "uSpecular");
+            shaderProgramQuestion.specularExpUniform = gl.getUniformLocation(shaderProgramQuestion, "uSpecularExp");
+            shaderProgramQuestion.samplerDiffUniform = gl.getUniformLocation(shaderProgramQuestion, "uSamplerDiff");
+
+            shaderProgramPlant = createProgram("shader-fs", "shader-vs");
+
+            shaderProgramPlant.vertexPositionAttribute = gl.getAttribLocation(shaderProgramPlant, "aVertexPosition");
+            gl.enableVertexAttribArray(shaderProgramPlant.vertexPositionAttribute);
+            shaderProgramPlant.vertexNormalAttribute = gl.getAttribLocation(shaderProgramPlant, "aVertexNormal");
+            gl.enableVertexAttribArray(shaderProgramPlant.vertexNormalAttribute);
+            shaderProgramPlant.textureCoordAttribute = gl.getAttribLocation(shaderProgramPlant, "aTextureCoord");
+            gl.enableVertexAttribArray(shaderProgramPlant.textureCoordAttribute);	
+            shaderProgramPlant.pMatrixUniform = gl.getUniformLocation(shaderProgramPlant, "uPMatrix");
+            shaderProgramPlant.mvMatrixUniform = gl.getUniformLocation(shaderProgramPlant, "uMVMatrix");
+            shaderProgramPlant.nMatrixUniform = gl.getUniformLocation(shaderProgramPlant, "uNMatrix");
+            shaderProgramPlant.intensityUniform = gl.getUniformLocation(shaderProgramPlant, "uLightIntensity");
+            shaderProgramPlant.lightPosUniform = gl.getUniformLocation(shaderProgramPlant, "uLightPos");
+            shaderProgramPlant.ambientUniform = gl.getUniformLocation(shaderProgramPlant, "uAmbient");
+            shaderProgramPlant.diffuseUniform = gl.getUniformLocation(shaderProgramPlant, "uDiffuse");
+            shaderProgramPlant.specularUniform = gl.getUniformLocation(shaderProgramPlant, "uSpecular");
+            shaderProgramPlant.specularExpUniform = gl.getUniformLocation(shaderProgramPlant, "uSpecularExp");
+            shaderProgramPlant.samplerDiffUniform = gl.getUniformLocation(shaderProgramPlant, "uSamplerDiff");
+
+            shaderProgramBonus = createProgram("shader-fs", "shader-vs");
+
+            shaderProgramBonus.vertexPositionAttribute = gl.getAttribLocation(shaderProgramBonus, "aVertexPosition");
+            gl.enableVertexAttribArray(shaderProgramBonus.vertexPositionAttribute);
+            shaderProgramBonus.vertexNormalAttribute = gl.getAttribLocation(shaderProgramBonus, "aVertexNormal");
+            gl.enableVertexAttribArray(shaderProgramBonus.vertexNormalAttribute);
+            shaderProgramBonus.textureCoordAttribute = gl.getAttribLocation(shaderProgramBonus, "aTextureCoord");
+            gl.enableVertexAttribArray(shaderProgramBonus.textureCoordAttribute);	
+            shaderProgramBonus.pMatrixUniform = gl.getUniformLocation(shaderProgramBonus, "uPMatrix");
+            shaderProgramBonus.mvMatrixUniform = gl.getUniformLocation(shaderProgramBonus, "uMVMatrix");
+            shaderProgramBonus.nMatrixUniform = gl.getUniformLocation(shaderProgramBonus, "uNMatrix");
+            shaderProgramBonus.intensityUniform = gl.getUniformLocation(shaderProgramBonus, "uLightIntensity");
+            shaderProgramBonus.lightPosUniform = gl.getUniformLocation(shaderProgramBonus, "uLightPos");
+            shaderProgramBonus.ambientUniform = gl.getUniformLocation(shaderProgramBonus, "uAmbient");
+            shaderProgramBonus.diffuseUniform = gl.getUniformLocation(shaderProgramBonus, "uDiffuse");
+            shaderProgramBonus.specularUniform = gl.getUniformLocation(shaderProgramBonus, "uSpecular");
+            shaderProgramBonus.specularExpUniform = gl.getUniformLocation(shaderProgramBonus, "uSpecularExp");
+            shaderProgramBonus.samplerDiffUniform = gl.getUniformLocation(shaderProgramBonus, "uSamplerDiff");
+
+            shaderProgramBackground = createProgram("shader-fs", "shader-vs");
+
+            shaderProgramBackground.vertexPositionAttribute = gl.getAttribLocation(shaderProgramBackground, "aVertexPosition");
+            gl.enableVertexAttribArray(shaderProgramBackground.vertexPositionAttribute);
+            shaderProgramBackground.vertexNormalAttribute = gl.getAttribLocation(shaderProgramBackground, "aVertexNormal");
+            gl.enableVertexAttribArray(shaderProgramBackground.vertexNormalAttribute);
+            shaderProgramBackground.textureCoordAttribute = gl.getAttribLocation(shaderProgramBackground, "aTextureCoord");
+            gl.enableVertexAttribArray(shaderProgramBackground.textureCoordAttribute);   
+            shaderProgramBackground.pMatrixUniform = gl.getUniformLocation(shaderProgramBackground, "uPMatrix");
+            shaderProgramBackground.mvMatrixUniform = gl.getUniformLocation(shaderProgramBackground, "uMVMatrix");
+            shaderProgramBackground.nMatrixUniform = gl.getUniformLocation(shaderProgramBackground, "uNMatrix");
+            shaderProgramBackground.intensityUniform = gl.getUniformLocation(shaderProgramBackground, "uLightIntensity");
+            shaderProgramBackground.lightPosUniform = gl.getUniformLocation(shaderProgramBackground, "uLightPos");
+            shaderProgramBackground.ambientUniform = gl.getUniformLocation(shaderProgramBackground, "uAmbient");
+            shaderProgramBackground.diffuseUniform = gl.getUniformLocation(shaderProgramBackground, "uDiffuse");
+            shaderProgramBackground.specularUniform = gl.getUniformLocation(shaderProgramBackground, "uSpecular");
+            shaderProgramBackground.specularExpUniform = gl.getUniformLocation(shaderProgramBackground, "uSpecularExp");
+            shaderProgramBackground.samplerDiffUniform = gl.getUniformLocation(shaderProgramBackground, "uSamplerDiff");
+
+
+    	}
+
+    	// Funcions per controlar la posició i rotació dels objectes de l'escena
+    	
+        function degToRad(degrees) {
+            return degrees * Math.PI / 180;
+        }
+
+        var yRot = 0;
+        var ySpeed = -3;		
+        var CAMERA_SPEED = 0.2;
+
+        var INIT_X_CAMERA = -10.0;
+        var xCamera = INIT_X_CAMERA;
+        var MIN_X_CAMERA_RIGHT = -30.0;
+        var MAX_X_CAMERA_LEFT = -5.0;
+
+		var INIT_Y_CAMERA = -7.0;
+        var yCamera = INIT_Y_CAMERA;
+        var MAX_Y_CAMERA = -25;
+        var MIN_Y_CAMERA = 3;
+
+        var INIT_Z_CAMERA = -20.0;
+        var z = INIT_Z_CAMERA;
+        var MIN_Z_CAMERA = -56.0;
+        var MAX_Z_CAMERA = -10.0;
+
+        var audio1  = new Audio('sounds/mario_main_theme.mp3');
+        audio1.loop = true;
+        var audio2  = new Audio('sounds/mario_level_complete.mp3');
+        audio2.loop = true;
+
+        var isPlayling1 = false;
+        var isPlayling2 = false;
+
+        var currentlyPressedKeys = {};
+
+    	// Callback de tecla premuda
+        function handleKeyDown(event) {
+            currentlyPressedKeys[event.keyCode] = true;
+        }
+
+    	// Callback de tecla desapretada
+        function handleKeyUp(event) {
+            currentlyPressedKeys[event.keyCode] = false;
+        }
+
+    	// Funció que gestiona els events d'entrada d'usuari 
+        function handleKeys() {
+            if (currentlyPressedKeys[90]) {
+                // Z key
+                z -= CAMERA_SPEED;// Zoom out
+                if (z <= MIN_Z_CAMERA) {
+                    z = MIN_Z_CAMERA + CAMERA_SPEED;
+                }
+            }
+            if (currentlyPressedKeys[88]) {
+                // X key
+                z += CAMERA_SPEED;// Zoom in
+                if (z >= MAX_Z_CAMERA) {
+                    z = MAX_Z_CAMERA - CAMERA_SPEED;
+                }
+            }
+            if (currentlyPressedKeys[40]) {
+                // Up cursor key
+                if(yCamera <= MIN_Y_CAMERA){
+                	yCamera += CAMERA_SPEED;	
+                }
+            }
+            if (currentlyPressedKeys[38]) {
+                // Down cursor key
+                if(yCamera >= MAX_Y_CAMERA){
+                	yCamera -= CAMERA_SPEED;	
+                }
+            }
+            if (currentlyPressedKeys[37]) {
+                // Left cursor key
+                xCamera += CAMERA_SPEED;
+                if (xCamera >= MAX_X_CAMERA_LEFT) {
+                    xCamera = MAX_X_CAMERA_LEFT - CAMERA_SPEED;
+                }
+            }
+            if (currentlyPressedKeys[39]) {
+                // Right cursor key
+                xCamera -= CAMERA_SPEED;
+                if (xCamera <= MIN_X_CAMERA_RIGHT) {
+                    xCamera = MIN_X_CAMERA_RIGHT + CAMERA_SPEED;
+                }
+            }
+            if (currentlyPressedKeys[32]) {
+                // Space key
+                if (!marioJumping) {
+                    zMarioSpeed = MARIO_INIT_SPEED;
+                    marioJumping = true;
+                }
+            }
+        }
+
+        onkeyup = function(evt) {
+            evt = evt || window.event;
+
+            if (evt.keyCode == 49) {
+                // Number 1
+                if(isPlayling1) {
+                    audio1.pause();
+                } else {
+                    audio1.play();
+                }
+                if (isPlayling2) {
+                    audio2.pause();
+                    isPlayling2 = false;
+                }
+                isPlayling1 = !isPlayling1;
+            }
+            if (evt.keyCode == 50) {
+                // Number 2
+                if(isPlayling2) {
+                    audio2.pause();
+                } else {
+                    audio2.play();
+                }
+                if (isPlayling1) {
+                    audio1.pause();
+                    isPlayling1 = false;
+                }
+                isPlayling2 = !isPlayling2;
+            }
+        };
+
+     	//Creem els Buffers pel Mario
+        var marioVertexPositionBuffer;
+        var marioVertexNormalBuffer;
+        var marioVertexTextureCoordBuffer;
+        function handleLoadedMario(marioData) {
+    	
+    		var model = K3D.parse.fromOBJ(marioData);
+    	
+    		var normals = K3D.edit.unwrap(model.i_norms , model.c_norms , 3);
+            marioVertexNormalBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, marioVertexNormalBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(normals), gl.STATIC_DRAW);
+            marioVertexNormalBuffer.itemSize = 3;
+            marioVertexNormalBuffer.numItems = normals.length / 3;
+
+    		var vertices = K3D.edit.unwrap(model.i_verts, model.c_verts, 3);
+            marioVertexPositionBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, marioVertexPositionBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
+            marioVertexPositionBuffer.itemSize = 3;
+            marioVertexPositionBuffer.numItems = vertices.length / 3;
+
+    		var uvs = K3D.edit.unwrap(model.i_uvt, model.c_uvt, 2);
+            marioVertexTextureCoordBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, marioVertexTextureCoordBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(uvs), gl.STATIC_DRAW);
+            marioVertexTextureCoordBuffer.itemSize = 2;
+            marioVertexTextureCoordBuffer.numItems = uvs.length / 2;
+    	
+        }	
+
+        //Creem els Buffers per la Pipe
+        var PipeVertexPositionBuffer;
+        var PipeVertexNormalBuffer;
+        var PipeVertexTextureCoordBuffer;
+        function handleLoadedPipe(pipeData) {
+        
+            var model = K3D.parse.fromOBJ(pipeData);
+        
+            var normals = K3D.edit.unwrap(model.i_norms , model.c_norms , 3);
+            PipeVertexNormalBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, PipeVertexNormalBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(normals), gl.STATIC_DRAW);
+            PipeVertexNormalBuffer.itemSize = 3;
+            PipeVertexNormalBuffer.numItems = normals.length / 3;
+
+            var vertices = K3D.edit.unwrap(model.i_verts, model.c_verts, 3);
+            PipeVertexPositionBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, PipeVertexPositionBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
+            PipeVertexPositionBuffer.itemSize = 3;
+            PipeVertexPositionBuffer.numItems = vertices.length / 3;
+
+            var uvs = K3D.edit.unwrap(model.i_uvt, model.c_uvt, 2);
+            PipeVertexTextureCoordBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, PipeVertexTextureCoordBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(uvs), gl.STATIC_DRAW);
+            PipeVertexTextureCoordBuffer.itemSize = 2;
+            PipeVertexTextureCoordBuffer.numItems = uvs.length / 2;
+            
+        } 
+
+        //Creem els Buffers pels Blocks
+        var BlocksVertexPositionBuffer;
+        var BlocksVertexNormalBuffer;
+        var BlocksVertexTextureCoordBuffer;
+        function handleLoadedBlock(blockData) {
+        
+            var model = K3D.parse.fromOBJ(blockData);
+        
+            var normals = K3D.edit.unwrap(model.i_norms , model.c_norms , 3);
+            BlocksVertexNormalBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, BlocksVertexNormalBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(normals), gl.STATIC_DRAW);
+            BlocksVertexNormalBuffer.itemSize = 3;
+            BlocksVertexNormalBuffer.numItems = normals.length / 3;
+
+            var vertices = K3D.edit.unwrap(model.i_verts, model.c_verts, 3);
+            BlocksVertexPositionBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, BlocksVertexPositionBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
+            BlocksVertexPositionBuffer.itemSize = 3;
+            BlocksVertexPositionBuffer.numItems = vertices.length / 3;
+
+            var uvs = K3D.edit.unwrap(model.i_uvt, model.c_uvt, 2);
+            BlocksVertexTextureCoordBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, BlocksVertexTextureCoordBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(uvs), gl.STATIC_DRAW);
+            BlocksVertexTextureCoordBuffer.itemSize = 2;
+            BlocksVertexTextureCoordBuffer.numItems = uvs.length / 2;
+            
+        } 
+
+        //Creem els Buffers per la Goomba
+        var GoombaVertexPositionBuffer;
+        var GoombaVertexNormalBuffer;
+        var GoombaVertexTextureCoordBuffer;
+        function handleLoadedGoomba(GoombaData) {
+        
+            var model = K3D.parse.fromOBJ(GoombaData);
+        
+            var normals = K3D.edit.unwrap(model.i_norms , model.c_norms , 3);
+            GoombaVertexNormalBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, GoombaVertexNormalBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(normals), gl.STATIC_DRAW);
+            GoombaVertexNormalBuffer.itemSize = 3;
+            GoombaVertexNormalBuffer.numItems = normals.length / 3;
+
+            var vertices = K3D.edit.unwrap(model.i_verts, model.c_verts, 3);
+            GoombaVertexPositionBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, GoombaVertexPositionBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
+            GoombaVertexPositionBuffer.itemSize = 3;
+            GoombaVertexPositionBuffer.numItems = vertices.length / 3;
+
+            var uvs = K3D.edit.unwrap(model.i_uvt, model.c_uvt, 2);
+            GoombaVertexTextureCoordBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, GoombaVertexTextureCoordBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(uvs), gl.STATIC_DRAW);
+            GoombaVertexTextureCoordBuffer.itemSize = 2;
+            GoombaVertexTextureCoordBuffer.numItems = uvs.length / 2;
+            
+        } 
+
+        //Creem els Buffers per la Coin
+        var CoinVertexPositionBuffer;
+        var CoinVertexNormalBuffer;
+        var CoinVertexTextureCoordBuffer;
+        function handleLoadedCoin(CoinData) {
+        
+            var model = K3D.parse.fromOBJ(CoinData);
+        
+            var normals = K3D.edit.unwrap(model.i_norms , model.c_norms , 3);
+            CoinVertexNormalBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, CoinVertexNormalBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(normals), gl.STATIC_DRAW);
+            CoinVertexNormalBuffer.itemSize = 3;
+            CoinVertexNormalBuffer.numItems = normals.length / 3;
+
+            var vertices = K3D.edit.unwrap(model.i_verts, model.c_verts, 3);
+            CoinVertexPositionBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, CoinVertexPositionBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
+            CoinVertexPositionBuffer.itemSize = 3;
+            CoinVertexPositionBuffer.numItems = vertices.length / 3;
+
+            var uvs = K3D.edit.unwrap(model.i_uvt, model.c_uvt, 2);
+            CoinVertexTextureCoordBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, CoinVertexTextureCoordBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(uvs), gl.STATIC_DRAW);
+            CoinVertexTextureCoordBuffer.itemSize = 2;
+            CoinVertexTextureCoordBuffer.numItems = uvs.length / 2;
+            
+        }
+
+        //Creem els Buffers per la Shell
+        var ShellVertexPositionBuffer;
+        var ShellVertexNormalBuffer;
+        var ShellVertexTextureCoordBuffer;
+        function handleLoadedShell(ShellData) {
+        
+            var model = K3D.parse.fromOBJ(ShellData);
+        
+            var normals = K3D.edit.unwrap(model.i_norms , model.c_norms , 3);
+            ShellVertexNormalBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, ShellVertexNormalBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(normals), gl.STATIC_DRAW);
+            ShellVertexNormalBuffer.itemSize = 3;
+            ShellVertexNormalBuffer.numItems = normals.length / 3;
+
+            var vertices = K3D.edit.unwrap(model.i_verts, model.c_verts, 3);
+            ShellVertexPositionBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, ShellVertexPositionBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
+            ShellVertexPositionBuffer.itemSize = 3;
+            ShellVertexPositionBuffer.numItems = vertices.length / 3;
+
+            var uvs = K3D.edit.unwrap(model.i_uvt, model.c_uvt, 2);
+            ShellVertexTextureCoordBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, ShellVertexTextureCoordBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(uvs), gl.STATIC_DRAW);
+            ShellVertexTextureCoordBuffer.itemSize = 2;
+            ShellVertexTextureCoordBuffer.numItems = uvs.length / 2;
+            
+        }
+
+        //Creem els Buffers per la Question
+        var QuestionVertexPositionBuffer;
+        var QuestionVertexNormalBuffer;
+        var QuestionVertexTextureCoordBuffer;
+        function handleLoadedQuestion(QuestionData) {
+        
+            var model = K3D.parse.fromOBJ(QuestionData);
+        
+            var normals = K3D.edit.unwrap(model.i_norms , model.c_norms , 3);
+            QuestionVertexNormalBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, QuestionVertexNormalBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(normals), gl.STATIC_DRAW);
+            QuestionVertexNormalBuffer.itemSize = 3;
+            QuestionVertexNormalBuffer.numItems = normals.length / 3;
+
+            var vertices = K3D.edit.unwrap(model.i_verts, model.c_verts, 3);
+            QuestionVertexPositionBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, QuestionVertexPositionBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
+            QuestionVertexPositionBuffer.itemSize = 3;
+            QuestionVertexPositionBuffer.numItems = vertices.length / 3;
+
+            var uvs = K3D.edit.unwrap(model.i_uvt, model.c_uvt, 2);
+            QuestionVertexTextureCoordBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, QuestionVertexTextureCoordBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(uvs), gl.STATIC_DRAW);
+            QuestionVertexTextureCoordBuffer.itemSize = 2;
+            QuestionVertexTextureCoordBuffer.numItems = uvs.length / 2;
+            
+        }
+
+        //Creem els Buffers per la Piranha Plant
+        var PlantVertexPositionBuffer;
+        var PlantVertexNormalBuffer;
+        var PlantVertexTextureCoordBuffer;
+        function handleLoadedPlant(PlantData) {
+            var model = K3D.parse.fromOBJ(PlantData);
+        
+            var normals = K3D.edit.unwrap(model.i_norms , model.c_norms , 3);
+            PlantVertexNormalBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, PlantVertexNormalBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(normals), gl.STATIC_DRAW);
+            PlantVertexNormalBuffer.itemSize = 3;
+            PlantVertexNormalBuffer.numItems = normals.length / 3;
+
+            var vertices = K3D.edit.unwrap(model.i_verts, model.c_verts, 3);
+            PlantVertexPositionBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, PlantVertexPositionBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
+            PlantVertexPositionBuffer.itemSize = 3;
+            PlantVertexPositionBuffer.numItems = vertices.length / 3;
+
+            var uvs = K3D.edit.unwrap(model.i_uvt, model.c_uvt, 2);
+            PlantVertexTextureCoordBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, PlantVertexTextureCoordBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(uvs), gl.STATIC_DRAW);
+           	PlantVertexTextureCoordBuffer.itemSize = 2;
+            PlantVertexTextureCoordBuffer.numItems = uvs.length / 2;
+            
+        }
+
+        //Creem els Buffers per Bonus
+        var BonusVertexPositionBuffer;
+        var BonusVertexNormalBuffer;
+        var BonusVertexTextureCoordBuffer;
+        function handleLoadedBonus(BonusData) {
+            var model = K3D.parse.fromOBJ(BonusData);
+        
+            var normals = K3D.edit.unwrap(model.i_norms , model.c_norms , 3);
+            BonusVertexNormalBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, BonusVertexNormalBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(normals), gl.STATIC_DRAW);
+            BonusVertexNormalBuffer.itemSize = 3;
+            BonusVertexNormalBuffer.numItems = normals.length / 3;
+
+            var vertices = K3D.edit.unwrap(model.i_verts, model.c_verts, 3);
+            BonusVertexPositionBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, BonusVertexPositionBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
+            BonusVertexPositionBuffer.itemSize = 3;
+            BonusVertexPositionBuffer.numItems = vertices.length / 3;
+
+            var uvs = K3D.edit.unwrap(model.i_uvt, model.c_uvt, 2);
+            BonusVertexTextureCoordBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, BonusVertexTextureCoordBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(uvs), gl.STATIC_DRAW);
+           	BonusVertexTextureCoordBuffer.itemSize = 2;
+            BonusVertexTextureCoordBuffer.numItems = uvs.length / 2;
+            
+        }
+
+        //Creem els Buffers pel Background
+        var BackgroundVertexPositionBuffer;
+        var BackgroundVertexNormalBuffer;
+        var BackgroundVertexTextureCoordBuffer;
+        function handleLoadedBackground(BackgroundData) {
+            var model = K3D.parse.fromOBJ(BackgroundData);
+        
+            var normals = K3D.edit.unwrap(model.i_norms , model.c_norms , 3);
+            BackgroundVertexNormalBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, BackgroundVertexNormalBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(normals), gl.STATIC_DRAW);
+            BackgroundVertexNormalBuffer.itemSize = 3;
+            BackgroundVertexNormalBuffer.numItems = normals.length / 3;
+
+            var vertices = K3D.edit.unwrap(model.i_verts, model.c_verts, 3);
+            BackgroundVertexPositionBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, BackgroundVertexPositionBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
+            BackgroundVertexPositionBuffer.itemSize = 3;
+            BackgroundVertexPositionBuffer.numItems = vertices.length / 3;
+
+            var uvs = K3D.edit.unwrap(model.i_uvt, model.c_uvt, 2);
+            BackgroundVertexTextureCoordBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, BackgroundVertexTextureCoordBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(uvs), gl.STATIC_DRAW);
+            BackgroundVertexTextureCoordBuffer.itemSize = 2;
+            BackgroundVertexTextureCoordBuffer.numItems = uvs.length / 2;
+            
+        }
+	
+
+    	//-----------------------------------------------------------------------------------
+    	// UPLOAD / IMPORT TEXTURES	
+    	//-----------------------------------------------------------------------------------
+    	// Funció que es crida un cop s'ha carregat la imatge
+    	// Omple un objecte textura amb les dades de la imatge carregada
+        
+        function handleLoadedTexture(texture) {
+            gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+
+            gl.bindTexture(gl.TEXTURE_2D, texture);
+    		
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA,
+    				      gl.UNSIGNED_BYTE, texture.image);
+    					  
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    		
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    		
+            gl.bindTexture(gl.TEXTURE_2D, null);
+        }
+
+        function loadTexture(texturePath) {
+            
+            var texture = gl.createTexture();
+    		
+            texture.image = new Image();
+            texture.image.onload = function () {
+                handleLoadedTexture(texture)
+            }
+            texture.image.src = texturePath;
+    		
+    		return texture;
+    	}
+
+    	var marioTexture;
+    	var pipeTexture;
+    	var blockTexture;
+    	var goombaTexture;
+    	var coinTexture;
+    	var shellTexture;
+    	var questionTexture;
+    	var plantTexture;
+        var backgroundTexture;
+        var bonusTexture;
+    	// Crea un objete textura i solicita la càrrega de la imatge que contindrà
+        function initTextures() {
+            marioTexture = loadTexture("assets/mario.jpg");	
+            pipeTexture = loadTexture("assets/pipe.png");
+            blockTexture = loadTexture("assets/blocks.png");
+            goombaTexture = loadTexture("assets/goomba.png");
+            coinTexture = loadTexture("assets/coin.png");
+            shellTexture = loadTexture("assets/shell.png");
+            questionTexture = loadTexture("assets/question.png");
+            plantTexture = loadTexture("assets/piranha.png");
+            backgroundTexture = loadTexture("assets/background.png");
+            bonusTexture = loadTexture("assets/flower.png");
+        }
+
+        function loadModels() {
+    		K3D.load("assets/mario_scenario.obj", handleLoadedMario);
+    		K3D.load("assets/pipe_scenario.obj", handleLoadedPipe);
+    		K3D.load("assets/blocks_scenario.obj", handleLoadedBlock);
+    		K3D.load("assets/goomba_scenario.obj", handleLoadedGoomba);
+    		K3D.load("assets/coin_scenario.obj", handleLoadedCoin);
+    		K3D.load("assets/shell_scenario.obj", handleLoadedShell);
+    		K3D.load("assets/question_scenario.obj", handleLoadedQuestion);
+    		K3D.load("assets/piranha_scenario.obj", handleLoadedPlant);
+            K3D.load("assets/background_scenario.obj", handleLoadedBackground);
+            K3D.load("assets/flower_scenario.obj", handleLoadedBonus);
+    	}	
+
+        var xLightPos = INIT_X_CAMERA;
+        var yLightPos = 70.0;
+        var zLightPos = 0.0;
+    	
+    	//-----------------------------------------------------------------------------------
+    	// DRAW FUNCTIONS	
+    	//-----------------------------------------------------------------------------------
+    	
+    	function drawMario(modelview, projection) {
+    	
+    		gl.useProgram(shaderProgramMario);
+    	
+    		gl.uniformMatrix4fv(shaderProgramMario.pMatrixUniform, false, projection);
+    		gl.uniformMatrix4fv(shaderProgramMario.mvMatrixUniform, false, modelview);
+    		
+    		// Matriu modelview de normals
+    		var normalMatrix = mat3.create();
+    		mat3.fromMat4(normalMatrix, modelview);
+    		mat3.invert(normalMatrix, normalMatrix);
+    		mat3.transpose(normalMatrix, normalMatrix);
+    		gl.uniformMatrix3fv(shaderProgramMario.nMatrixUniform, false, normalMatrix);
+
+    		// Especifica paràmetres de materials i il·luminació
+    		gl.uniform1f(shaderProgramMario.intensityUniform, 100.0);
+    		gl.uniform3f(shaderProgramMario.lightPosUniform, xLightPos, yLightPos, zLightPos);
+    		gl.uniform3f(shaderProgramMario.ambientUniform, 0.1, 0.1, 0.1);
+    		gl.uniform3f(shaderProgramMario.diffuseUniform, 1.0, 1.0, 1.0);
+    		gl.uniform3f(shaderProgramMario.specularUniform, 1.0, 1.0, 1.0);
+    		gl.uniform1f(shaderProgramMario.specularExpUniform, 50.0);
+    		
+    		gl.bindBuffer(gl.ARRAY_BUFFER, marioVertexPositionBuffer);
+    		gl.vertexAttribPointer(shaderProgramMario.vertexPositionAttribute, marioVertexPositionBuffer.itemSize, gl.FLOAT, false, 0, 0);
+    		
+    		gl.bindBuffer(gl.ARRAY_BUFFER, marioVertexNormalBuffer);
+    		gl.vertexAttribPointer(shaderProgramMario.vertexNormalAttribute, marioVertexNormalBuffer.itemSize, gl.FLOAT, false, 0, 0);
+    		
+    		gl.bindBuffer(gl.ARRAY_BUFFER, marioVertexTextureCoordBuffer);
+    		gl.vertexAttribPointer(shaderProgramMario.textureCoordAttribute, marioVertexTextureCoordBuffer.itemSize, gl.FLOAT, false, 0, 0);		
+    		
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, marioTexture);
+            gl.uniform1i(shaderProgramMario.samplerDiffUniform, 0);
+
+    		gl.drawArrays(gl.TRIANGLES, 0, marioVertexPositionBuffer.numItems);
+    	}
+    	
+    	function drawPipe(modelview, projection) {
+        
+            gl.useProgram(shaderProgramPipe);
+        
+            gl.uniformMatrix4fv(shaderProgramPipe.pMatrixUniform, false, projection);
+            gl.uniformMatrix4fv(shaderProgramPipe.mvMatrixUniform, false, modelview);
+            
+            var normalMatrix = mat3.create();
+            mat3.fromMat4(normalMatrix, modelview);
+            mat3.invert(normalMatrix, normalMatrix);
+            mat3.transpose(normalMatrix, normalMatrix);
+            gl.uniformMatrix3fv(shaderProgramPipe.nMatrixUniform, false, normalMatrix);
+
+            gl.uniform1f(shaderProgramPipe.intensityUniform, 80.0);
+            gl.uniform3f(shaderProgramPipe.lightPosUniform, xLightPos, yLightPos, zLightPos);
+            gl.uniform3f(shaderProgramPipe.ambientUniform, 0.1, 0.1, 0.1);
+            gl.uniform3f(shaderProgramPipe.diffuseUniform, 1.0, 1.0, 1.0);
+            gl.uniform3f(shaderProgramPipe.specularUniform, 1.0, 1.0, 1.0);
+            gl.uniform1f(shaderProgramPipe.specularExpUniform, 50.0);
+            
+            gl.bindBuffer(gl.ARRAY_BUFFER, PipeVertexPositionBuffer);
+            gl.vertexAttribPointer(shaderProgramPipe.vertexPositionAttribute, PipeVertexPositionBuffer.itemSize, gl.FLOAT, false, 0, 0);
+            
+            gl.bindBuffer(gl.ARRAY_BUFFER, PipeVertexNormalBuffer);
+            gl.vertexAttribPointer(shaderProgramPipe.vertexNormalAttribute, PipeVertexNormalBuffer.itemSize, gl.FLOAT, false, 0, 0);
+            
+            gl.bindBuffer(gl.ARRAY_BUFFER, PipeVertexTextureCoordBuffer);
+            gl.vertexAttribPointer(shaderProgramPipe.textureCoordAttribute, PipeVertexTextureCoordBuffer.itemSize, gl.FLOAT, false, 0, 0);      
+            
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, pipeTexture);
+            gl.uniform1i(shaderProgramPipe.samplerDiffUniform, 0);
+
+            gl.drawArrays(gl.TRIANGLES, 0, PipeVertexPositionBuffer.numItems);
+        }
+
+    	function drawBlocks(modelview, projection) {
+        
+            gl.useProgram(shaderProgramBlocks);
+        
+            gl.uniformMatrix4fv(shaderProgramBlocks.pMatrixUniform, false, projection);
+            gl.uniformMatrix4fv(shaderProgramBlocks.mvMatrixUniform, false, modelview);
+            
+            var normalMatrix = mat3.create();
+            mat3.fromMat4(normalMatrix, modelview);
+            mat3.invert(normalMatrix, normalMatrix);
+            mat3.transpose(normalMatrix, normalMatrix);
+            gl.uniformMatrix3fv(shaderProgramBlocks.nMatrixUniform, false, normalMatrix);
+
+            gl.uniform1f(shaderProgramBlocks.intensityUniform, 80.0);
+            gl.uniform3f(shaderProgramBlocks.lightPosUniform, xLightPos, yLightPos, zLightPos);
+            gl.uniform3f(shaderProgramBlocks.ambientUniform, 0.1, 0.1, 0.1);
+            gl.uniform3f(shaderProgramBlocks.diffuseUniform, 1.0, 1.0, 1.0);
+            gl.uniform3f(shaderProgramBlocks.specularUniform, 1.0, 1.0, 1.0);
+            gl.uniform1f(shaderProgramBlocks.specularExpUniform, 50.0);
+            
+            gl.bindBuffer(gl.ARRAY_BUFFER, BlocksVertexPositionBuffer);
+            gl.vertexAttribPointer(shaderProgramBlocks.vertexPositionAttribute, BlocksVertexPositionBuffer.itemSize, gl.FLOAT, false, 0, 0);
+            
+            gl.bindBuffer(gl.ARRAY_BUFFER, BlocksVertexNormalBuffer);
+            gl.vertexAttribPointer(shaderProgramBlocks.vertexNormalAttribute, BlocksVertexNormalBuffer.itemSize, gl.FLOAT, false, 0, 0);
+            
+            gl.bindBuffer(gl.ARRAY_BUFFER, BlocksVertexTextureCoordBuffer);
+            gl.vertexAttribPointer(shaderProgramBlocks.textureCoordAttribute, BlocksVertexTextureCoordBuffer.itemSize, gl.FLOAT, false, 0, 0);      
+            
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, blockTexture);
+            gl.uniform1i(shaderProgramBlocks.samplerDiffUniform, 0);
+
+            gl.drawArrays(gl.TRIANGLES, 0, BlocksVertexPositionBuffer.numItems);
+        }
+
+    	function drawGoomba(modelview, projection) {
+        
+            gl.useProgram(shaderProgramGoomba);
+        
+            gl.uniformMatrix4fv(shaderProgramGoomba.pMatrixUniform, false, projection);
+            gl.uniformMatrix4fv(shaderProgramGoomba.mvMatrixUniform, false, modelview);
+            
+            var normalMatrix = mat3.create();
+            mat3.fromMat4(normalMatrix, modelview);
+            mat3.invert(normalMatrix, normalMatrix);
+            mat3.transpose(normalMatrix, normalMatrix);
+            gl.uniformMatrix3fv(shaderProgramGoomba.nMatrixUniform, false, normalMatrix);
+
+            gl.uniform1f(shaderProgramGoomba.intensityUniform, 80.0);
+            gl.uniform3f(shaderProgramGoomba.lightPosUniform, xLightPos, yLightPos, zLightPos);
+            gl.uniform3f(shaderProgramGoomba.ambientUniform, 0.1, 0.1, 0.1);
+            gl.uniform3f(shaderProgramGoomba.diffuseUniform, 1.0, 1.0, 1.0);
+            gl.uniform3f(shaderProgramGoomba.specularUniform, 1.0, 1.0, 1.0);
+            gl.uniform1f(shaderProgramGoomba.specularExpUniform, 50.0);
+            
+            gl.bindBuffer(gl.ARRAY_BUFFER, GoombaVertexPositionBuffer);
+            gl.vertexAttribPointer(shaderProgramGoomba.vertexPositionAttribute, GoombaVertexPositionBuffer.itemSize, gl.FLOAT, false, 0, 0);
+            
+            gl.bindBuffer(gl.ARRAY_BUFFER, GoombaVertexNormalBuffer);
+            gl.vertexAttribPointer(shaderProgramGoomba.vertexNormalAttribute, GoombaVertexNormalBuffer.itemSize, gl.FLOAT, false, 0, 0);
+            
+            gl.bindBuffer(gl.ARRAY_BUFFER, GoombaVertexTextureCoordBuffer);
+            gl.vertexAttribPointer(shaderProgramGoomba.textureCoordAttribute, GoombaVertexTextureCoordBuffer.itemSize, gl.FLOAT, false, 0, 0);      
+            
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, goombaTexture);
+            gl.uniform1i(shaderProgramGoomba.samplerDiffUniform, 0);
+
+            gl.drawArrays(gl.TRIANGLES, 0, GoombaVertexPositionBuffer.numItems);
+        }
+
+    	function drawCoin(modelview, projection) {
+        
+            gl.useProgram(shaderProgramCoin);
+        
+            gl.uniformMatrix4fv(shaderProgramCoin.pMatrixUniform, false, projection);
+            gl.uniformMatrix4fv(shaderProgramCoin.mvMatrixUniform, false, modelview);
+            
+            var normalMatrix = mat3.create();
+            mat3.fromMat4(normalMatrix, modelview);
+            mat3.invert(normalMatrix, normalMatrix);
+            mat3.transpose(normalMatrix, normalMatrix);
+            gl.uniformMatrix3fv(shaderProgramCoin.nMatrixUniform, false, normalMatrix);
+
+            gl.uniform1f(shaderProgramCoin.intensityUniform, 80.0);
+            gl.uniform3f(shaderProgramCoin.lightPosUniform, xLightPos, yLightPos, zLightPos);
+            gl.uniform3f(shaderProgramCoin.ambientUniform, 0.1, 0.1, 0.1);
+            gl.uniform3f(shaderProgramCoin.diffuseUniform, 1.0, 1.0, 1.0);
+            gl.uniform3f(shaderProgramCoin.specularUniform, 1.0, 1.0, 1.0);
+            gl.uniform1f(shaderProgramCoin.specularExpUniform, 50.0);
+            
+            gl.bindBuffer(gl.ARRAY_BUFFER, CoinVertexPositionBuffer);
+            gl.vertexAttribPointer(shaderProgramCoin.vertexPositionAttribute, CoinVertexPositionBuffer.itemSize, gl.FLOAT, false, 0, 0);
+            
+            gl.bindBuffer(gl.ARRAY_BUFFER, CoinVertexNormalBuffer);
+            gl.vertexAttribPointer(shaderProgramCoin.vertexNormalAttribute, CoinVertexNormalBuffer.itemSize, gl.FLOAT, false, 0, 0);
+            
+            gl.bindBuffer(gl.ARRAY_BUFFER, CoinVertexTextureCoordBuffer);
+            gl.vertexAttribPointer(shaderProgramCoin.textureCoordAttribute, CoinVertexTextureCoordBuffer.itemSize, gl.FLOAT, false, 0, 0);      
+            
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, coinTexture);
+            gl.uniform1i(shaderProgramCoin.samplerDiffUniform, 0);
+
+            gl.drawArrays(gl.TRIANGLES, 0, CoinVertexPositionBuffer.numItems);
+        }
+
+    	function drawShell(modelview, projection) {
+        
+            gl.useProgram(shaderProgramShell);
+        
+            gl.uniformMatrix4fv(shaderProgramShell.pMatrixUniform, false, projection);
+            gl.uniformMatrix4fv(shaderProgramShell.mvMatrixUniform, false, modelview);
+            
+            var normalMatrix = mat3.create();
+            mat3.fromMat4(normalMatrix, modelview);
+            mat3.invert(normalMatrix, normalMatrix);
+            mat3.transpose(normalMatrix, normalMatrix);
+            gl.uniformMatrix3fv(shaderProgramShell.nMatrixUniform, false, normalMatrix);
+
+            gl.uniform1f(shaderProgramShell.intensityUniform, 80.0);
+            gl.uniform3f(shaderProgramShell.lightPosUniform, xLightPos, yLightPos, zLightPos);
+            gl.uniform3f(shaderProgramShell.ambientUniform, 0.1, 0.1, 0.1);
+            gl.uniform3f(shaderProgramShell.diffuseUniform, 1.0, 1.0, 1.0);
+            gl.uniform3f(shaderProgramShell.specularUniform, 1.0, 1.0, 1.0);
+            gl.uniform1f(shaderProgramShell.specularExpUniform, 50.0);
+            
+            gl.bindBuffer(gl.ARRAY_BUFFER, ShellVertexPositionBuffer);
+            gl.vertexAttribPointer(shaderProgramShell.vertexPositionAttribute, ShellVertexPositionBuffer.itemSize, gl.FLOAT, false, 0, 0);
+            
+            gl.bindBuffer(gl.ARRAY_BUFFER, ShellVertexNormalBuffer);
+            gl.vertexAttribPointer(shaderProgramShell.vertexNormalAttribute, ShellVertexNormalBuffer.itemSize, gl.FLOAT, false, 0, 0);
+            
+            gl.bindBuffer(gl.ARRAY_BUFFER, ShellVertexTextureCoordBuffer);
+            gl.vertexAttribPointer(shaderProgramShell.textureCoordAttribute, ShellVertexTextureCoordBuffer.itemSize, gl.FLOAT, false, 0, 0);      
+            
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, shellTexture);
+            gl.uniform1i(shaderProgramShell.samplerDiffUniform, 0);
+
+            gl.drawArrays(gl.TRIANGLES, 0, ShellVertexPositionBuffer.numItems);
+        }
+
+    	function drawQuestion(modelview, projection) {
+        
+            gl.useProgram(shaderProgramQuestion);
+        
+            gl.uniformMatrix4fv(shaderProgramQuestion.pMatrixUniform, false, projection);
+            gl.uniformMatrix4fv(shaderProgramQuestion.mvMatrixUniform, false, modelview);
+            
+            var normalMatrix = mat3.create();
+            mat3.fromMat4(normalMatrix, modelview);
+            mat3.invert(normalMatrix, normalMatrix);
+            mat3.transpose(normalMatrix, normalMatrix);
+            gl.uniformMatrix3fv(shaderProgramQuestion.nMatrixUniform, false, normalMatrix);
+
+            gl.uniform1f(shaderProgramQuestion.intensityUniform, 80.0);
+            gl.uniform3f(shaderProgramQuestion.lightPosUniform, xLightPos, yLightPos, zLightPos);
+            gl.uniform3f(shaderProgramQuestion.ambientUniform, 0.1, 0.1, 0.1);
+            gl.uniform3f(shaderProgramQuestion.diffuseUniform, 1.0, 1.0, 1.0);
+            gl.uniform3f(shaderProgramQuestion.specularUniform, 1.0, 1.0, 1.0);
+            gl.uniform1f(shaderProgramQuestion.specularExpUniform, 50.0);
+            
+            gl.bindBuffer(gl.ARRAY_BUFFER, QuestionVertexPositionBuffer);
+            gl.vertexAttribPointer(shaderProgramQuestion.vertexPositionAttribute, QuestionVertexPositionBuffer.itemSize, gl.FLOAT, false, 0, 0);
+            
+            gl.bindBuffer(gl.ARRAY_BUFFER, QuestionVertexNormalBuffer);
+            gl.vertexAttribPointer(shaderProgramQuestion.vertexNormalAttribute, QuestionVertexNormalBuffer.itemSize, gl.FLOAT, false, 0, 0);
+            
+            gl.bindBuffer(gl.ARRAY_BUFFER, QuestionVertexTextureCoordBuffer);
+            gl.vertexAttribPointer(shaderProgramQuestion.textureCoordAttribute, QuestionVertexTextureCoordBuffer.itemSize, gl.FLOAT, false, 0, 0);      
+            
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, questionTexture);
+            gl.uniform1i(shaderProgramQuestion.samplerDiffUniform, 0);
+
+            gl.drawArrays(gl.TRIANGLES, 0, QuestionVertexPositionBuffer.numItems);
+        }
+
+        function drawPlant(modelview, projection) {
+        
+            gl.useProgram(shaderProgramPlant);
+        
+            gl.uniformMatrix4fv(shaderProgramPlant.pMatrixUniform, false, projection);
+            gl.uniformMatrix4fv(shaderProgramPlant.mvMatrixUniform, false, modelview);
+            
+            var normalMatrix = mat3.create();
+            mat3.fromMat4(normalMatrix, modelview);
+            mat3.invert(normalMatrix, normalMatrix);
+            mat3.transpose(normalMatrix, normalMatrix);
+            gl.uniformMatrix3fv(shaderProgramPlant.nMatrixUniform, false, normalMatrix);
+
+            gl.uniform1f(shaderProgramPlant.intensityUniform, 80.0);
+            gl.uniform3f(shaderProgramPlant.lightPosUniform, xLightPos, yLightPos, zLightPos);
+            gl.uniform3f(shaderProgramPlant.ambientUniform, 0.1, 0.1, 0.1);
+            gl.uniform3f(shaderProgramPlant.diffuseUniform, 1.0, 1.0, 1.0);
+            gl.uniform3f(shaderProgramPlant.specularUniform, 1.0, 1.0, 1.0);
+            gl.uniform1f(shaderProgramPlant.specularExpUniform, 50.0);
+            
+            gl.bindBuffer(gl.ARRAY_BUFFER, PlantVertexPositionBuffer);
+            gl.vertexAttribPointer(shaderProgramPlant.vertexPositionAttribute, PlantVertexPositionBuffer.itemSize, gl.FLOAT, false, 0, 0);
+            
+            gl.bindBuffer(gl.ARRAY_BUFFER, PlantVertexNormalBuffer);
+            gl.vertexAttribPointer(shaderProgramPlant.vertexNormalAttribute, PlantVertexNormalBuffer.itemSize, gl.FLOAT, false, 0, 0);
+            
+            gl.bindBuffer(gl.ARRAY_BUFFER, PlantVertexTextureCoordBuffer);
+            gl.vertexAttribPointer(shaderProgramPlant.textureCoordAttribute, PlantVertexTextureCoordBuffer.itemSize, gl.FLOAT, false, 0, 0);      
+            
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, plantTexture);
+            gl.uniform1i(shaderProgramPlant.samplerDiffUniform, 0);
+
+            gl.drawArrays(gl.TRIANGLES, 0, PlantVertexPositionBuffer.numItems);
+        }
+
+        function drawBonus(modelview, projection) {
+        
+            gl.useProgram(shaderProgramBonus);
+        
+            gl.uniformMatrix4fv(shaderProgramBonus.pMatrixUniform, false, projection);
+            gl.uniformMatrix4fv(shaderProgramBonus.mvMatrixUniform, false, modelview);
+            
+            var normalMatrix = mat3.create();
+            mat3.fromMat4(normalMatrix, modelview);
+            mat3.invert(normalMatrix, normalMatrix);
+            mat3.transpose(normalMatrix, normalMatrix);
+            gl.uniformMatrix3fv(shaderProgramBonus.nMatrixUniform, false, normalMatrix);
+
+            gl.uniform1f(shaderProgramBonus.intensityUniform, 80.0);
+            gl.uniform3f(shaderProgramBonus.lightPosUniform, xLightPos, yLightPos, zLightPos);
+            gl.uniform3f(shaderProgramBonus.ambientUniform, 0.1, 0.1, 0.1);
+            gl.uniform3f(shaderProgramBonus.diffuseUniform, 1.0, 1.0, 1.0);
+            gl.uniform3f(shaderProgramBonus.specularUniform, 1.0, 1.0, 1.0);
+            gl.uniform1f(shaderProgramBonus.specularExpUniform, 50.0);
+            
+            gl.bindBuffer(gl.ARRAY_BUFFER, BonusVertexPositionBuffer);
+            gl.vertexAttribPointer(shaderProgramBonus.vertexPositionAttribute, BonusVertexPositionBuffer.itemSize, gl.FLOAT, false, 0, 0);
+            
+            gl.bindBuffer(gl.ARRAY_BUFFER, BonusVertexNormalBuffer);
+            gl.vertexAttribPointer(shaderProgramBonus.vertexNormalAttribute, BonusVertexNormalBuffer.itemSize, gl.FLOAT, false, 0, 0);
+            
+            gl.bindBuffer(gl.ARRAY_BUFFER, BonusVertexTextureCoordBuffer);
+            gl.vertexAttribPointer(shaderProgramBonus.textureCoordAttribute, BonusVertexTextureCoordBuffer.itemSize, gl.FLOAT, false, 0, 0);      
+            
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, bonusTexture);
+            gl.uniform1i(shaderProgramBonus.samplerDiffUniform, 0);
+
+            gl.drawArrays(gl.TRIANGLES, 0, BonusVertexPositionBuffer.numItems);
+        }
+
+        function drawBackground(modelview, projection) {
+        
+            gl.useProgram(shaderProgramBackground);
+        
+            gl.uniformMatrix4fv(shaderProgramBackground.pMatrixUniform, false, projection);
+            gl.uniformMatrix4fv(shaderProgramBackground.mvMatrixUniform, false, modelview);
+            
+            var normalMatrix = mat3.create();
+            mat3.fromMat4(normalMatrix, modelview);
+            mat3.invert(normalMatrix, normalMatrix);
+            mat3.transpose(normalMatrix, normalMatrix);
+            gl.uniformMatrix3fv(shaderProgramBackground.nMatrixUniform, false, normalMatrix);
+
+            gl.uniform1f(shaderProgramBackground.intensityUniform, 80.0);
+            gl.uniform3f(shaderProgramBackground.lightPosUniform, xLightPos, yLightPos, zLightPos);
+            gl.uniform3f(shaderProgramBackground.ambientUniform, 0.1, 0.1, 0.1);
+            gl.uniform3f(shaderProgramBackground.diffuseUniform, 1.0, 1.0, 1.0);
+            gl.uniform3f(shaderProgramBackground.specularUniform, 1.0, 1.0, 1.0);
+            gl.uniform1f(shaderProgramBackground.specularExpUniform, 50.0);
+            
+            gl.bindBuffer(gl.ARRAY_BUFFER, BackgroundVertexPositionBuffer);
+            gl.vertexAttribPointer(shaderProgramBackground.vertexPositionAttribute, BackgroundVertexPositionBuffer.itemSize, gl.FLOAT, false, 0, 0);
+            
+            gl.bindBuffer(gl.ARRAY_BUFFER, BackgroundVertexNormalBuffer);
+            gl.vertexAttribPointer(shaderProgramBackground.vertexNormalAttribute, BackgroundVertexNormalBuffer.itemSize, gl.FLOAT, false, 0, 0);
+            
+            gl.bindBuffer(gl.ARRAY_BUFFER, BackgroundVertexTextureCoordBuffer);
+            gl.vertexAttribPointer(shaderProgramBackground.textureCoordAttribute, BackgroundVertexTextureCoordBuffer.itemSize, gl.FLOAT, false, 0, 0);      
+            
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, backgroundTexture);
+            gl.uniform1i(shaderProgramBackground.samplerDiffUniform, 0);
+
+            gl.drawArrays(gl.TRIANGLES, 0, BackgroundVertexPositionBuffer.numItems);
+        }
+
+
+        function drawScene() {
+            gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+    		// Matriu de projecciÃ³
+            var pMatrix = mat4.create();
+            var aspect = canvas.clientWidth / canvas.clientHeight;
+            mat4.perspective(pMatrix, 45, aspect, 0.1, 100.0);
+
+            //Creem tota la matriu view i li apliquem totes els moviments de camara.
+            //invertim la matriu 
+            var mView = mat4.create();
+            mat4.identity(mView);
+            mat4.invert(mView, mView);
+
+
+           if (marioVertexPositionBuffer != null && marioVertexNormalBuffer != null && marioVertexTextureCoordBuffer != null) {
+    			
+    			// Matriu modelview
+    			var mvMatrix = mat4.create();
+    			mat4.identity(mvMatrix);
+                mat4.translate(mvMatrix, mvMatrix, [xCamera, yCamera, z]);
+                mat4.translate(mvMatrix, mvMatrix, [0, zMarioPos, 0]);
+    			mat4.scale(mvMatrix, mvMatrix, [0.02, 0.02, 0.02]);
+    			mat4.rotate(mvMatrix, mvMatrix, -67.5, [0, 1, 0]);
+    			
+    			drawMario(mvMatrix, pMatrix);
+
+    		}	
+
+    		if (PipeVertexPositionBuffer != null && PipeVertexNormalBuffer != null && PipeVertexTextureCoordBuffer != null) {
+    	   
+    			// Matriu modelview
+    			var mvMatrix = mat4.create();
+    			mat4.identity(mvMatrix);
+    			mat4.translate(mvMatrix, mvMatrix, [xCamera, yCamera, z]);
+    			mat4.scale(mvMatrix, mvMatrix, [0.02, 0.02, 0.02]);
+    			mat4.rotate(mvMatrix, mvMatrix, -67.5, [0, 1, 0]);
+                
+                drawPipe(mvMatrix, pMatrix);
+
+    		}
+
+
+    		if (BlocksVertexPositionBuffer != null && BlocksVertexNormalBuffer != null && BlocksVertexTextureCoordBuffer != null) {
+    			// Matriu modelview
+    			var mvMatrix = mat4.create();
+    			mat4.identity(mvMatrix);
+    			mat4.translate(mvMatrix, mvMatrix, [xCamera, yCamera, z]);
+    			mat4.scale(mvMatrix, mvMatrix, [0.02, 0.02, 0.02]);
+    			mat4.rotate(mvMatrix, mvMatrix, -67.5, [0, 1, 0]);
+                
+                drawBlocks(mvMatrix, pMatrix);
+
+    		}
+
+    		if (GoombaVertexPositionBuffer != null && GoombaVertexNormalBuffer != null && GoombaVertexTextureCoordBuffer != null) {
+    			// Matriu modelview
+    			var mvMatrix = mat4.create();
+    			mat4.identity(mvMatrix);
+                mat4.translate(mvMatrix, mvMatrix, [xCamera, yCamera, z]);
+                mat4.translate(mvMatrix, mvMatrix, [xGoomba, 0, 0]);
+    			mat4.scale(mvMatrix, mvMatrix, [0.02, 0.02, 0.02]);
+    			mat4.rotate(mvMatrix, mvMatrix, -67.5, [0, 1, 0]);
+                
+                drawGoomba(mvMatrix, pMatrix);
+
+    		}
+
+    		if (CoinVertexPositionBuffer != null && CoinVertexNormalBuffer != null && CoinVertexTextureCoordBuffer != null) {
+    			// Matriu modelview
+    			var mvMatrix = mat4.create();
+    			mat4.identity(mvMatrix);
+                mat4.translate(mvMatrix, mvMatrix, [xCamera + 3, yCamera + 4.5, z]);
+    			mat4.scale(mvMatrix, mvMatrix, [0.02, 0.02, 0.02]);
+                mat4.rotate(mvMatrix, mvMatrix, degToRad(yCoinRotate), [0, 1, 0]);
+
+                drawCoin(mvMatrix, pMatrix);
+
+    		}
+
+    		if (ShellVertexPositionBuffer != null && ShellVertexNormalBuffer != null && ShellVertexTextureCoordBuffer != null) {
+    			// Matriu modelview
+    			var mvMatrix = mat4.create();
+    			mat4.identity(mvMatrix);
+    			mat4.translate(mvMatrix, mvMatrix, [xCamera, yCamera, z]);
+                mat4.translate(mvMatrix, mvMatrix, [xShell, 0, 0]);
+    			mat4.scale(mvMatrix, mvMatrix, [0.02, 0.02, 0.02]);
+    			mat4.rotate(mvMatrix, mvMatrix, -67.5, [0, 1, 0]);
+                
+                drawShell(mvMatrix, pMatrix);
+
+    		}
+
+    		if (QuestionVertexPositionBuffer != null && QuestionVertexNormalBuffer != null && QuestionVertexTextureCoordBuffer != null) {
+    			// Matriu modelview
+    			var mvMatrix = mat4.create();
+    			mat4.identity(mvMatrix);
+    			mat4.translate(mvMatrix, mvMatrix, [xCamera, yCamera, z]);
+    			mat4.translate(mvMatrix, mvMatrix, [13.3, 10.6, 5.8]);
+    			mat4.scale(mvMatrix, mvMatrix, [0.02, 0.02, 0.02]);
+    			mat4.rotate(mvMatrix, mvMatrix, -67.5, [0, 1, 0]);
+                
+                drawQuestion(mvMatrix, pMatrix);
+
+    		}
+
+    		if (PlantVertexPositionBuffer != null && PlantVertexNormalBuffer != null && PlantVertexTextureCoordBuffer != null) {
+    			// Matriu modelview
+    			var mvMatrix = mat4.create();
+    			mat4.identity(mvMatrix);
+    			mat4.translate(mvMatrix, mvMatrix, [xCamera, yCamera, z]);
+                mat4.translate(mvMatrix, mvMatrix, [27.25, xPlant+4, 0]);
+    			mat4.scale(mvMatrix, mvMatrix, [0.06, 0.06, 0.06]);
+    			mat4.rotate(mvMatrix, mvMatrix, -67.5, [0, 0, 0]);
+        
+                drawPlant(mvMatrix, pMatrix);
+
+    		}
+
+    		if (BonusVertexPositionBuffer != null && BonusVertexNormalBuffer != null && BonusVertexTextureCoordBuffer != null) {
+    			// Matriu modelview
+    			var mvMatrix = mat4.create();
+    			mat4.identity(mvMatrix);
+    			mat4.identity(mvMatrix);
+    			mat4.translate(mvMatrix, mvMatrix, [xCamera, yCamera, z]);
+    			mat4.scale(mvMatrix, mvMatrix, [0.02, 0.02, 0.02]);
+    			mat4.rotate(mvMatrix, mvMatrix, -67.5, [0, 1, 0]);
+        
+                drawBonus(mvMatrix, pMatrix);
+
+    		}
+
+            if (BackgroundVertexPositionBuffer != null && BackgroundVertexNormalBuffer != null && BackgroundVertexTextureCoordBuffer != null) {
+                // Matriu modelview
+                var mvMatrix = mat4.create();
+                mat4.identity(mvMatrix);
+                mat4.translate(mvMatrix, mvMatrix, [xCamera - 20, yCamera, z]);
+                mat4.scale(mvMatrix, mvMatrix, [0.06, 0.06, 0.06]);
+                mat4.rotate(mvMatrix, mvMatrix, -67.5, [0, 1, 0]);
+        
+                drawBackground(mvMatrix, pMatrix);
+
+            }
+        }
+
+        var lastTime = 0;
+
+        var MIN_X_GOOMBA_RIGHT = -10;
+        var MAX_X_GOOMBA_LEFT = 6;
+        var GOOMBA_SPEED = 5;
+        var xGoomba = MAX_X_GOOMBA_LEFT;
+        function animateGoomba(elapsed) {
+            xGoomba += GOOMBA_SPEED * elapsed / 1000.0;
+
+            if (xGoomba < MIN_X_GOOMBA_RIGHT) {
+                xGoomba = MIN_X_GOOMBA_RIGHT + 0.05;
+                GOOMBA_SPEED *= -1;
+            } else if (xGoomba > MAX_X_GOOMBA_LEFT) {
+                xGoomba = MAX_X_GOOMBA_LEFT - 0.05;
+                GOOMBA_SPEED *= -1;
+            }
+        }
+
+        var MIN_X_SHELL_RIGHT = -4;
+        var MAX_X_SHELL_LEFT = 6;
+        var SHELL_SPEED = 7;
+        var xShell = MAX_X_SHELL_LEFT;
+        function animateShell(elapsed) {
+            xShell += SHELL_SPEED * elapsed / 1000.0;
+
+            if (xShell < MIN_X_SHELL_RIGHT) {
+                xShell = MIN_X_SHELL_RIGHT + 0.05;
+                SHELL_SPEED *= -1;
+            } else if (xShell > MAX_X_SHELL_LEFT) {
+                xShell = MAX_X_SHELL_LEFT - 0.05;
+                SHELL_SPEED *= -1;
+            }
+        }
+
+        var COIN_ROTATE_SPEED = 100;
+        var yCoinRotate = 0.0;
+        function animateCoin (elapsed) {
+            yCoinRotate += COIN_ROTATE_SPEED * elapsed / 1000.0;
+
+            if (yCoinRotate > 360) yCoinRotate = 0;
+        }
+
+        var MARIO_INIT_SPEED = 30;
+        var MARIO_INIT_POS = 0;
+        var zMarioSpeed = 0;
+        var zMarioPos = MARIO_INIT_POS;
+        var GRAVITY = 100;
+        var marioJumping = false;
+        function animateMario (elapsed) {
+            if (marioJumping) {
+                zMarioPos += zMarioSpeed * elapsed / 1000;
+                zMarioSpeed -= GRAVITY * elapsed / 1000;
+
+                if (zMarioPos < MARIO_INIT_POS) {
+                    zMarioPos = MARIO_INIT_POS;
+                    zMarioSpeed = 0;
+                    marioJumping = false;
+                }
+            }
+        }
+
+        var MIN_Y_PLANT = 1;
+        var MAX_Y_PLANT = 5;
+        var PLANT_SPEED = 0.9;
+        var xPlant = MAX_Y_PLANT;
+        function animatePlant (elapsed) {
+            xPlant += PLANT_SPEED * elapsed / 1000.0;
+
+            if (xPlant < MIN_Y_PLANT) {
+                xPlant = MIN_Y_PLANT + 0.05;
+                PLANT_SPEED *= -1;
+            } else if (xPlant > MAX_Y_PLANT) {
+                xPlant = MAX_Y_PLANT - 0.05;
+                PLANT_SPEED *= -1;
+            }
+        }
+
+    	// Modifica l'estat de la rotació
+        function animate() {
+            var timeNow = new Date().getTime();
+            if (lastTime != 0) {
+                var elapsed = timeNow - lastTime;
+
+                yRot += (ySpeed * elapsed) / 1000.0;
+                animatePlant(elapsed);
+                animateGoomba(elapsed);
+                animateShell(elapsed);
+                animateCoin(elapsed);
+                animateMario(elapsed);
+
+            }
+            lastTime = timeNow;
+        }
+
+    	// Bucle principal que es crida amb un framerate constant
+        function tick() {
+            requestAnimFrame(tick);
+            handleKeys();
+            drawScene();
+            animate();
+        }
+    	
+    	var canvas;
+
+    	// Funció d'inicialització
+        function webGLStart() {
+            canvas = document.getElementById("webgl-canvas");
+            resizeWindow();
+
+            initGL(canvas);
+            initShaders();
+            initTextures();		
+     		loadModels();
+
+            gl.clearColor(0.5, 0.8, 0.9, 1.0);
+            gl.enable(gl.DEPTH_TEST);
+
+            document.onkeydown = handleKeyDown;
+            document.onkeyup = handleKeyUp;
+
+            tick();
+        }
+
+    </script>
+
+</head>
+
+<!-- HTML de la pàgina -->
+
+<body onload="webGLStart();">
+
+    <div id='blackHud'></div>
+    <div id='name'>MARIO<br> COINS x0</div>
+    <div id='world'>WORLD<br> 1-1</div>
+    <div id='timer'>000000</div>
+    <div id='createdBy'>Created by:<br>Marc Aragones (ls25741)<br>Marc Arroyo (ls28877)<br>David Gimeno (ls29013)</div>
+    <div id='instructions'>
+        <h5>Instructions</h5>
+        <ul>
+            <li>SPACE -> Jump mario</li>
+            <li>LEFT ARROW -> Move camera to the left</li>
+            <li>RIGHT ARROW -> Move camera to the right</li>
+            <li>UP ARROW -> Move camera up</li>
+            <li>DOWN ARROW -> Move camera down</li>
+            <li>X -> Zoom in camera</li>
+            <li>Z -> Zoom out camera</li>
+            <li>1 -> Play main song</li>
+            <li>2 -> Play win song</li>
+        </ul>
+    </div>
+
+    <canvas id="webgl-canvas" style="border: none;" width="window.innerWidth;" height="window.innerHeight"></canvas>
+
+    <script type="text/javascript" src="counter.js"></script>
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/1.12.2/jquery.min.js"></script>
+    <script type="text/javascript" src="bootstrap.min.js"></script>
+    
+</body>
+
+</html>
